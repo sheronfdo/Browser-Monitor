@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">browsermonitor</string>
+    <string name="accessibility_service_description">Monitors browsing activity to capture search queries and URLs for testing purposes.</string>
+</resources>
