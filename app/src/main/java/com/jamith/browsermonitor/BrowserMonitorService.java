@@ -16,6 +16,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -41,7 +42,9 @@ public class BrowserMonitorService extends AccessibilityService {
         info.eventTypes = AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED |
                 AccessibilityEvent.TYPE_VIEW_FOCUSED |
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED |
-                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED;
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED |
+                AccessibilityEvent.TYPE_VIEW_CLICKED |
+                AccessibilityEvent.TYPE_VIEW_SCROLLED;
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
         info.packageNames = null; // Monitor all packages, filter in code
         info.flags = AccessibilityServiceInfo.DEFAULT;
@@ -80,24 +83,76 @@ public class BrowserMonitorService extends AccessibilityService {
         }
 
         String packageName = event.getPackageName() != null ? event.getPackageName().toString() : "";
-        Log.d(TAG, "Event received from: " + packageName + " | Type: " + event.getEventType());
+        Log.d(TAG, "Event received from: " + packageName + " | Type: " + AccessibilityEvent.eventTypeToString(event.getEventType()));
 
         if (!BROWSER_PACKAGES.contains(packageName)) {
             Log.d(TAG, "Ignored non-browser package: " + packageName);
             return;
         }
 
+        AccessibilityNodeInfo source = event.getSource();
         AccessibilityNodeInfo rootNode = getRootInActiveWindow();
-        if (rootNode == null) {
-            Log.w(TAG, "Root node is null for package: " + packageName);
+        if (source == null && rootNode == null) {
+            Log.w(TAG, "Both source and root node are null for package: " + packageName);
             return;
         }
 
         try {
-            traverseNode(rootNode);
+            // Check address bar explicitly
+            String url = findUrlInAddressBar(rootNode != null ? rootNode : source, packageName);
+            if (url != null) {
+                Log.d(TAG, "Found URL in address bar: " + url);
+                processBrowsingData(url);
+            } else {
+                Log.d(TAG, "No URL found in address bar, traversing nodes");
+                traverseNode(rootNode != null ? rootNode : source);
+            }
         } finally {
-            rootNode.recycle();
+            if (source != null) source.recycle();
+            if (rootNode != null) rootNode.recycle();
         }
+    }
+
+    private String findUrlInAddressBar(AccessibilityNodeInfo node, String packageName) {
+        if (node == null) return null;
+        try {
+            // Check browser-specific address bar IDs
+            List<AccessibilityNodeInfo> urlNodes = node.findAccessibilityNodeInfosByViewId(packageName + ":id/url_bar");
+            for (AccessibilityNodeInfo urlNode : urlNodes) {
+                CharSequence text = urlNode.getText();
+                if (text != null && text.toString().startsWith("http")) {
+                    String url = text.toString().trim();
+                    Log.d(TAG, "URL from address bar (" + packageName + ":id/url_bar): " + url);
+                    return url;
+                }
+                urlNode.recycle();
+            }
+
+            // Fallback: Check editable nodes
+            if (node.isEditable() && node.getText() != null) {
+                String text = node.getText().toString().trim();
+                if (text.startsWith("http")) {
+                    Log.d(TAG, "URL from editable node: " + text);
+                    return text;
+                }
+            }
+
+            // Recurse through children
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child != null) {
+                    String url = findUrlInAddressBar(child, packageName);
+                    if (url != null) {
+                        child.recycle();
+                        return url;
+                    }
+                    child.recycle();
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error finding URL in address bar: " + e.getMessage());
+        }
+        return null;
     }
 
     private void traverseNode(AccessibilityNodeInfo node) {
